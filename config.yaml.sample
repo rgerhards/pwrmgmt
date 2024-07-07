@@ -1,0 +1,11 @@
+hysteresis_interval: 10
+sleep_time: 2
+eps: 20
+min_change_interval: 10
+url: 'http://tasmota-ip/cm?cmnd=status%208'
+ECOFLOW_ACCESSKEY: 'accesskey'
+ECOFLOW_SECRETKEY: 'secretkey'
+ECOFLOW_SN: 'sn'
+ECOFLOW_API_HTTP_URL: 'https://api.ecoflow.com/'
+MQTT_BROKER_ADDRESS: 'mybrokerip'
+MQTT_PORT: 1883
