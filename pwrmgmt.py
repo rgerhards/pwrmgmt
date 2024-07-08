@@ -19,12 +19,10 @@ soc = None
 pv1_power = None
 pv2_power = None
 total_power_generation = None
-max_power_duration = None
 soc_below_30 = False
 injection_permitted = True  # New variable to store injection permission
 last_soc_check_time = 0
 car_charging = 0
-force_max_power = False
 current_power = 0  # Global variable to store the current power
 
 def on_message(client, userdata, message):
@@ -82,9 +80,9 @@ def update_and_get_soc(ecoflow_api, mqtt_client):
         logging.error(f"Failed to update SoC: {e}")
         soc = pv1_power = pv2_power = total_power_generation = None
 
-def get_max_power():
-    global max_power_duration, soc, soc_below_30, injection_permitted, total_power_generation, car_charging, force_max_power
-    force_max_power = False
+def get_inject_power_range():
+    global soc, soc_below_30, injection_permitted, total_power_generation, car_charging
+
     current_hour = datetime.now().hour
     if 19 <= current_hour or current_hour < 7:
         constant_max_power = 100
@@ -111,52 +109,53 @@ def get_max_power():
     if total_power_generation is None:
         total_power_generation = 0
 
-    pv_limited_power = int(total_power_generation * 0.9)
-    max_power = max(pv_limited_power, constant_max_power)
+    max_power = constant_max_power
 
     if car_charging > 10:
         max_power = int(total_power_generation * 0.9)
 
-    if soc is not None and soc >= 90 and max_power > 0:  # "battery full" case
-        # the idea is to set it to some level so that the adjustment
-        # logic inside the PowerStream can work itself
-        max_power = min(int(total_power_generation), 50)
-        force_max_power = True
     if soc is not None and soc <= 17:
         max_power = int(total_power_generation * 0.9)
 
-    print(f"max power {max_power}, SoC: {soc}, PV: {total_power_generation}, car {car_charging}")
-    return max_power
+    if soc is not None and soc <= 85:
+        min_power = 0
+    else: # "battery full" case
+        # This is kind of a work-around for bugs in PowerStream firmware, which
+        # sometimes behaves strange if it hits real bat max SoC. Sometimes it
+        # does not inject all generation. We try to avoid this by taking action
+        # before real max Soc.
+        min_power = int(total_power_generation * 0.98)
+
+    print(f"min/max power ({min_power},{max_power}), SoC: {soc}, PV: {total_power_generation}, car {car_charging}")
+    return min_power, max_power
 
 def set_battery_output(current_power, config, ecoflow_api, mqtt_client):
-    global last_injection_value, max_power_duration
+    global last_injection_value
 
-    max_power = get_max_power()
+    min_power, max_power = get_inject_power_range()
+    logging.info(f"got inject power range {min_power}, {max_power}")
     injection_value = max(min(current_power + last_injection_value, max_power), 0)
     eps = config.get('eps')
 
     if current_power < -eps:
-        if force_max_power:
-            new_injection_value = max_power
-        else:
-            new_injection_value = max(last_injection_value + current_power, 0)
+        new_injection_value = max(last_injection_value + current_power, 0)
         if last_injection_value > 0:
             injection_value = new_injection_value
-            logging.info(f"Adjusting injection to {injection_value} watts due to negative power consumption. force: {force_max_power}")
+            logging.info(f"Adjusting injection to {injection_value} watts due to negative power consumption.")
         else:
             logging.info("Current power is negative and injection is already 0. No change needed.")
             return last_injection_value
     elif current_power > eps:
-        if max_power_duration is None:
-            max_power_duration = time.time()
         if injection_value == last_injection_value:
             logging.info("No significant change in power consumption. No change needed.")
             return last_injection_value
         logging.info(f"Increasing injection to {injection_value} watts due to positive power consumption.")
     else:
-        max_power_duration = None
         logging.info(f"Power consumption within epsilon range ({current_power}). No change needed.")
         return last_injection_value
+
+    if injection_value < min_power: # battery full case
+        injection_value = min_power
 
     if injection_value != last_injection_value:
         ecoflow_api.set_ef_powerstream_custom_load_power(injection_value)
@@ -168,7 +167,7 @@ def set_battery_output(current_power, config, ecoflow_api, mqtt_client):
 
     last_injection_value = injection_value
 
-    return injection_value
+    return 0, injection_value
 
 def get_power_in(url, mqtt_client):
     global current_power
