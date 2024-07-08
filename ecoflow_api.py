@@ -6,13 +6,16 @@ import random
 import json
 import logging
 import time
+import paho.mqtt.client as mqtt
 
 class EcoFlowAPI:
-    def __init__(self, base_url, access_key, secret_key, serial_number):
+    def __init__(self, base_url, access_key, secret_key, serial_number, status_update_callback):
         self.base_url = base_url
         self.access_key = access_key
         self.secret_key = secret_key
         self.serial_number = serial_number
+        self.status_update_callback = status_update_callback
+        self.mqtt_client = None
 
     def hmac_sha256(self, data, key):
         hashed = hmac.new(key.encode('utf-8'), data.encode('utf-8'), hashlib.sha256).digest()
@@ -132,4 +135,105 @@ class EcoFlowAPI:
         except Exception as e:
             logging.error(f"Error fetching Ecoflow data: {str(e)}")
             return None
+
+    def get_mqtt_certification(self):
+        url = self.base_url + 'iot-open/sign/certification'
+        json_data = self.get_api(url)
+        cert = json_data.get("data")
+        return cert
+
+    # MQTT-related methods
+    def connect_to_mqtt(self):
+        # Get MQTT certification
+        certification = self.get_mqtt_certification()
+        logging.info(f"MQTT Certification: {certification}")
+
+        broker_url = certification['url']
+        broker_port = int(certification['port'])
+        certificate_account = certification['certificateAccount']
+        certificate_password = certification['certificatePassword']
+
+        # Create MQTT client instance
+        self.mqtt_client = mqtt.Client(client_id="rg_pwrMgmt")
+        logging.debug("MQTT client created")
+
+        # Set username and password
+        self.mqtt_client.username_pw_set(certificate_account, certificate_password)
+
+        # Enable TLS for secure connection
+        self.mqtt_client.tls_set()
+
+        # Enable detailed logging for the MQTT client
+        self.mqtt_client.enable_logger(logging.getLogger(__name__))
+
+        # Define callback functions
+        def on_connect(client, userdata, flags, rc):
+            if rc == 0:
+                logging.info("Connected to MQTT broker successfully")
+                # Subscribe to the topic after successful connection
+                topic = f'/open/{certificate_account}/{self.serial_number}/quota'
+                client.subscribe(topic)
+                logging.info(f"Subscribed to topic: {topic}")
+            else:
+                logging.error(f"Failed to connect to MQTT broker. Return code {rc}")
+
+        def on_message(client, userdata, message):
+            payload = message.payload.decode("utf-8")
+            try:
+                data = json.loads(payload)
+                params = data['param']
+                # Call the user-provided callback if it exists
+                if self.status_update_callback:
+                    self.status_update_callback(params)
+                #print(json.dumps(data, indent=4))
+                #logging.info(f"Message received from topic {message.topic}")
+            except json.JSONDecodeError as e:
+                logging.error(f"Failed to decode JSON payload: {e}")
+                logging.error(f"Payload: {payload}")
+
+        def on_log(client, userdata, level, buf):
+            logging.debug(f"MQTT Log: {buf}")
+
+        # Assign callback functions
+        self.mqtt_client.on_connect = on_connect
+        self.mqtt_client.on_message = on_message
+        self.mqtt_client.on_log = on_log
+
+        # Connect to the broker
+        logging.info(f"Connecting to {broker_url}:{broker_port} with client ID rg_pwrMgmt")
+        self.mqtt_client.connect(broker_url, broker_port)
+        logging.info("Connect command issued")
+
+        # Start the network loop
+        self.mqtt_client.loop_start()
+
+    def disconnect_mqtt(self):
+        if self.mqtt_client:
+            self.mqtt_client.loop_stop()
+            self.mqtt_client.disconnect()
+            logging.info("Disconnected from MQTT broker")
+
+if __name__ == "__main__":
+    logging.basicConfig(level=logging.DEBUG)
+
+    # Example usage
+    config_handler = ConfigHandler()
+
+    ecoflow_api = EcoFlowAPI(
+        config_handler.get('ECOFLOW_API_HTTP_URL'), 
+        config_handler.get('ECOFLOW_ACCESSKEY'), 
+        config_handler.get('ECOFLOW_SECRETKEY'), 
+        config_handler.get('ECOFLOW_SN')
+    )
+
+    # Connect to MQTT server
+    ecoflow_api.connect_to_mqtt()
+
+    # Keep the script running
+    try:
+        while True:
+            time.sleep(1)  # Sleep to reduce CPU usage
+    except KeyboardInterrupt:
+        logging.info("Disconnecting from MQTT broker...")
+        ecoflow_api.disconnect_mqtt()
 

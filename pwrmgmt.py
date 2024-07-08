@@ -16,6 +16,7 @@ logging.basicConfig(level=logging.INFO, format='%(message)s')
 # Global variables
 last_injection_value = 1  # Initialize the last injection value to 1
 soc = None
+soc_mqtt = -1
 pv1_power = None
 pv2_power = None
 total_power_generation = None
@@ -36,7 +37,7 @@ def on_message(client, userdata, message):
         logging.error(f"Failed to decode JSON from MQTT message: {e}")
 
 def setup_mqtt_client(config):
-    client = mqtt.Client()
+    client = mqtt.Client(client_id='rg_pwrMgmt')
     client.on_message = on_message
     client.connect(config.get('MQTT_BROKER_ADDRESS'), config.get('MQTT_PORT'), 60)
     client.subscribe("HA-to-rg_PwrMgmt")
@@ -48,6 +49,32 @@ def publish_to_mqtt(client, topic, payload):
 def update_soc(new_soc):
     global soc
     soc = new_soc
+
+def on_status_update(params):
+    global soc_mqtt, soc, pv1_power, pv2_power, total_power_generation, mqtt_client
+    #print(f'pv1: {params["pv1InputWatts"]}, pv2: {params["pv2InputWatts"]}')
+    #print(f'number params: {len(params)}')
+    soc = params.get("batSoc")
+    if soc is not None:
+        soc_mqtt = soc
+    pv1_power = params["pv1InputWatts"]
+    pv2_power = params["pv2InputWatts"]
+    prev_total = total_power_generation
+    if pv1_power is not None and pv2_power is not None:
+        pv1_power /= 10
+        pv2_power /= 10
+        total_power_generation = int(pv1_power + pv2_power)
+    else:
+        total_power_generation = None
+    print(f"EF MQTT CALLBACK: total PV: {total_power_generation}, soc: {soc_mqtt}")
+    # Publish updated data to HA
+    if prev_total != total_power_generation:
+        payload = {
+            "PV_total": int(total_power_generation)
+        }
+        publish_to_mqtt(mqtt_client, 'rg_PwrMgmt-to-HA', payload)
+
+
 
 def update_and_get_soc(ecoflow_api, mqtt_client):
     global soc, pv1_power, pv2_power, total_power_generation
@@ -144,15 +171,15 @@ def set_battery_output(current_power, config, ecoflow_api, mqtt_client):
             logging.info(f"Adjusting injection to {injection_value} watts due to negative power consumption.")
         else:
             logging.info("Current power is negative and injection is already 0. No change needed.")
-            return last_injection_value
+            #return last_injection_value
     elif current_power > eps:
         if injection_value == last_injection_value:
             logging.info("No significant change in power consumption. No change needed.")
-            return last_injection_value
+            #return last_injection_value
         logging.info(f"Increasing injection to {injection_value} watts due to positive power consumption.")
     else:
         logging.info(f"Power consumption within epsilon range ({current_power}). No change needed.")
-        return last_injection_value
+        #return last_injection_value
 
     if injection_value < min_power: # battery full case
         injection_value = min_power
@@ -167,7 +194,7 @@ def set_battery_output(current_power, config, ecoflow_api, mqtt_client):
 
     last_injection_value = injection_value
 
-    return 0, injection_value
+    return
 
 def get_power_in(url, mqtt_client):
     global current_power
@@ -214,7 +241,7 @@ def processing_loop(url, config_handler, ecoflow_api, mqtt_client):
             mqtt_client.loop()  # Process MQTT messages
 
             current_time = time.time()
-            if current_time - last_soc_check_time >= 60:  # Update SoC every 60 seconds
+            if current_time - last_soc_check_time >= 240:  # Update SoC every 60 seconds
                 update_and_get_soc(ecoflow_api, mqtt_client)
                 last_soc_check_time = current_time
 
@@ -225,6 +252,7 @@ def processing_loop(url, config_handler, ecoflow_api, mqtt_client):
         traceback.print_exc()
 
 def main():
+    global mqtt_client
     logging.info("EcoFlow PowerStream Management Script")
     config_handler = ConfigHandler()
 
@@ -234,10 +262,14 @@ def main():
         config_handler.get('ECOFLOW_API_HTTP_URL'), 
         config_handler.get('ECOFLOW_ACCESSKEY'), 
         config_handler.get('ECOFLOW_SECRETKEY'), 
-        config_handler.get('ECOFLOW_SN')
+        config_handler.get('ECOFLOW_SN'),
+        on_status_update
     )
 
     url = config_handler.get('url')
+    
+    # Connect to MQTT server
+    ecoflow_api.connect_to_mqtt()
 
     # initial queries
     update_and_get_soc(ecoflow_api, mqtt_client)
