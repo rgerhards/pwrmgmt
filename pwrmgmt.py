@@ -57,18 +57,19 @@ def on_status_update(params):
     soc = params.get("batSoc")
     if soc is not None:
         soc_mqtt = soc
-    pv1_power = params["pv1InputWatts"]
-    pv2_power = params["pv2InputWatts"]
+    pv1_power = params.get("pv1InputWatts")
+    pv2_power = params.get("pv2InputWatts")
     prev_total = total_power_generation
     if pv1_power is not None and pv2_power is not None:
         pv1_power /= 10
         pv2_power /= 10
         total_power_generation = int(pv1_power + pv2_power)
-    else:
-        total_power_generation = None
-    print(f"EF MQTT CALLBACK: total PV: {total_power_generation}, soc: {soc_mqtt}")
+    #else:
+        #print("MQTT: did not modify total_power_generation, got no data")
+        #total_power_generation = None
+    print(f"EF MQTT CALLBACK: pv1 {pv1_power}, total PV: {total_power_generation}, soc: {soc_mqtt}")
     # Publish updated data to HA
-    if prev_total != total_power_generation:
+    if total_power_generation is not None and prev_total != total_power_generation:
         payload = {
             "PV_total": int(total_power_generation)
         }
@@ -181,8 +182,8 @@ def set_battery_output(current_power, config, ecoflow_api, mqtt_client):
         logging.info(f"Power consumption within epsilon range ({current_power}). No change needed.")
         #return last_injection_value
 
-    if injection_value < min_power: # battery full case
-        injection_value = min_power
+    #if injection_value < min_power: # battery full case
+    #    injection_value = min_power
 
     if injection_value != last_injection_value:
         ecoflow_api.set_ef_powerstream_custom_load_power(injection_value)
@@ -241,7 +242,7 @@ def processing_loop(url, config_handler, ecoflow_api, mqtt_client):
             mqtt_client.loop()  # Process MQTT messages
 
             current_time = time.time()
-            if current_time - last_soc_check_time >= 240:  # Update SoC every 60 seconds
+            if current_time - last_soc_check_time >= 20:  # Update SoC every 60 seconds
                 update_and_get_soc(ecoflow_api, mqtt_client)
                 last_soc_check_time = current_time
 

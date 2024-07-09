@@ -140,6 +140,7 @@ class EcoFlowAPI:
         url = self.base_url + 'iot-open/sign/certification'
         json_data = self.get_api(url)
         cert = json_data.get("data")
+        json.dumps(cert)
         return cert
 
     # MQTT-related methods
@@ -172,6 +173,7 @@ class EcoFlowAPI:
                 logging.info("Connected to MQTT broker successfully")
                 # Subscribe to the topic after successful connection
                 topic = f'/open/{certificate_account}/{self.serial_number}/quota'
+                print(f"TOPIC: {topic}")
                 client.subscribe(topic)
                 logging.info(f"Subscribed to topic: {topic}")
             else:
@@ -185,7 +187,7 @@ class EcoFlowAPI:
                 # Call the user-provided callback if it exists
                 if self.status_update_callback:
                     self.status_update_callback(params)
-                #print(json.dumps(data, indent=4))
+                #print(json.dumps(params, indent=4))
                 #logging.info(f"Message received from topic {message.topic}")
             except json.JSONDecodeError as e:
                 logging.error(f"Failed to decode JSON payload: {e}")
