@@ -23,8 +23,10 @@ total_power_generation = None
 soc_below_30 = False
 injection_permitted = True  # New variable to store injection permission
 last_soc_check_time = 0
+last_power_in_check_time = 0
 car_charging = 0
 current_power = 0  # Global variable to store the current power
+config_handler = None
 
 def on_message(client, userdata, message):
     global injection_permitted, car_charging
@@ -113,24 +115,24 @@ def get_inject_power_range():
 
     current_hour = datetime.now().hour
     if 19 <= current_hour or current_hour < 7:
-        constant_max_power = 100
-    elif 7 <= current_hour <= 14:
+        constant_max_power = 115
+    elif 7 <= current_hour <= 13: # This means between 7:00 and 13:59!
         constant_max_power = 800
     else:
         if soc is not None:
             if soc < 30:
                 soc_below_30 = True
-                constant_max_power = 0
+                constant_max_power = int(total_power_generation * 0.9)
             elif soc_below_30 and soc < 40:
-                constant_max_power = 0
+                constant_max_power = int(total_power_generation * 0.9)
             else:
                 soc_below_30 = False
                 if soc > 50:
                     constant_max_power = 800
                 elif 41 <= soc <= 50:
-                    constant_max_power = 200
+                    constant_max_power = max(int(total_power_generation * 0.9), 200)
                 else:
-                    constant_max_power = 99
+                    constant_max_power = max(int(total_power_generation * 0.9), 99)
         else:
             constant_max_power = 800
 
@@ -154,14 +156,14 @@ def get_inject_power_range():
         # before real max Soc.
         min_power = int(total_power_generation * 0.98)
 
-    print(f"min/max power ({min_power},{max_power}), SoC: {soc}, PV: {total_power_generation}, car {car_charging}")
+    print(f"min/max power ({min_power},{max_power}), SoC: {soc}, PV: {total_power_generation}, car {car_charging}, pwr_in {current_power}")
     return min_power, max_power
 
 def set_battery_output(current_power, config, ecoflow_api, mqtt_client):
     global last_injection_value
 
     min_power, max_power = get_inject_power_range()
-    logging.info(f"got inject power range {min_power}, {max_power}")
+    #logging.info(f"got inject power range {min_power}, {max_power}")
     injection_value = max(min(current_power + last_injection_value, max_power), 0)
     eps = config.get('eps')
 
@@ -170,16 +172,15 @@ def set_battery_output(current_power, config, ecoflow_api, mqtt_client):
         if last_injection_value > 0:
             injection_value = new_injection_value
             logging.info(f"Adjusting injection to {injection_value} watts due to negative power consumption.")
-        else:
-            logging.info("Current power is negative and injection is already 0. No change needed.")
-            #return last_injection_value
+        #else:
+            #logging.info("Current power is negative and injection is already 0. No change needed.")
     elif current_power > eps:
-        if injection_value == last_injection_value:
-            logging.info("No significant change in power consumption. No change needed.")
-            #return last_injection_value
-        logging.info(f"Increasing injection to {injection_value} watts due to positive power consumption.")
-    else:
-        logging.info(f"Power consumption within epsilon range ({current_power}). No change needed.")
+        if injection_value != last_injection_value:
+            logging.info(f"Increasing injection to {injection_value} watts due to positive power consumption.")
+            #else case
+            #logging.info("No significant change in power consumption. No change needed.")
+    #else:
+        #logging.info(f"Power consumption within epsilon range ({current_power}). No change needed.")
         #return last_injection_value
 
     #if injection_value < min_power: # battery full case
@@ -197,18 +198,20 @@ def set_battery_output(current_power, config, ecoflow_api, mqtt_client):
 
     return
 
-def get_power_in(url, mqtt_client):
-    global current_power
+def get_power_in(mqtt_client):
+    global current_power, last_power_in_check_time, config_handler
     try:
+        url = config_handler.get('url')
         response = requests.get(url)
         response.raise_for_status()
         data = response.json()
         if 'StatusSNS' in data and 'E320' in data['StatusSNS'] and 'Power_in' in data['StatusSNS']['E320']:
-            power_in = data['StatusSNS']['E320']['Power_in']
+            power_in = int(data['StatusSNS']['E320']['Power_in'])
             current_power = power_in
             # Publish power consumption to MQTT
             payload = {"SmartMeter_currentPowerIn": int(power_in)}
             publish_to_mqtt(mqtt_client, 'rg_PwrMgmt-to-HA', payload)
+            last_power_in_check_time = time.time()
             return power_in
         else:
             raise ValueError("Required data not found in the response")
@@ -219,7 +222,7 @@ def get_power_in(url, mqtt_client):
 
 def power_in_loop(url, mqtt_client, config_handler):
     while True:
-        get_power_in(url, mqtt_client)
+        get_power_in(mqtt_client)
         time.sleep(config_handler.get('sleep_time'))
 
 def processing_loop(url, config_handler, ecoflow_api, mqtt_client):
@@ -232,7 +235,7 @@ def processing_loop(url, config_handler, ecoflow_api, mqtt_client):
         update_and_get_soc(ecoflow_api, mqtt_client)
 
         # Initial setting to establish the state of the battery subsystem
-        current_power = get_power_in(url, mqtt_client)
+        current_power = get_power_in(mqtt_client)
         logging.info(f"Initial Power_in: {current_power} watts, Current Injection: {last_injection_value} watts")
         set_battery_output(current_power, config_handler, ecoflow_api, mqtt_client)
         logging.info(f"Initial setting done. Sleeping for {config_handler.get('min_change_interval')} seconds.")
@@ -245,6 +248,10 @@ def processing_loop(url, config_handler, ecoflow_api, mqtt_client):
             if current_time - last_soc_check_time >= 20:  # Update SoC every 60 seconds
                 update_and_get_soc(ecoflow_api, mqtt_client)
                 last_soc_check_time = current_time
+            # saveguard for now - we had stalled process
+            if current_time - last_power_in_check_time >= 10:
+                logging.error(f"ERROR: get_power_in stalled for {int(current_time - last_power_in_check_time)} seconds - polling it now!")
+                get_power_in(mqtt_client)
 
             set_battery_output(current_power, config_handler, ecoflow_api, mqtt_client)
             time.sleep(config_handler.get('hysteresis_interval') if last_injection_value != 0 else config_handler.get('sleep_time'))
@@ -253,7 +260,7 @@ def processing_loop(url, config_handler, ecoflow_api, mqtt_client):
         traceback.print_exc()
 
 def main():
-    global mqtt_client
+    global mqtt_client, config_handler
     logging.info("EcoFlow PowerStream Management Script")
     config_handler = ConfigHandler()
 
@@ -270,11 +277,12 @@ def main():
     url = config_handler.get('url')
     
     # Connect to MQTT server
-    ecoflow_api.connect_to_mqtt()
+    # mqtt API does NOT work right now - unknown reason
+    #ecoflow_api.connect_to_mqtt()
 
     # initial queries
     update_and_get_soc(ecoflow_api, mqtt_client)
-    get_power_in(url, mqtt_client)
+    get_power_in(mqtt_client)
 
     # Start the power_in_loop in a separate thread
     power_in_thread = threading.Thread(target=power_in_loop, args=(url, mqtt_client, config_handler))

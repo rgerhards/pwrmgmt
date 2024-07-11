@@ -123,6 +123,7 @@ class EcoFlowAPI:
         payload = self.get_api(url_device, {"sn": self.serial_number})
         check_ps_status = self.check_if_device_is_online(self.serial_number, payload)
 
+        # dynamic vs. permanentWatts!
         quotas = ["20_1.permanentWatts"]
         params = {"quotas": quotas}
 
@@ -182,12 +183,13 @@ class EcoFlowAPI:
         def on_message(client, userdata, message):
             payload = message.payload.decode("utf-8")
             try:
+                #print(f"userdata: {userdata}")
                 data = json.loads(payload)
                 params = data['param']
                 # Call the user-provided callback if it exists
                 if self.status_update_callback:
                     self.status_update_callback(params)
-                #print(json.dumps(params, indent=4))
+                print(json.dumps(data, indent=4))
                 #logging.info(f"Message received from topic {message.topic}")
             except json.JSONDecodeError as e:
                 logging.error(f"Failed to decode JSON payload: {e}")
